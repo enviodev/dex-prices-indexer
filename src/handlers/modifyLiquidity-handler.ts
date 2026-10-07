@@ -1,5 +1,12 @@
 /*
- * Liquidity event handlers for Uniswap v4 pools
+ * Liquidity events for Uniswap v4 pools.
+ *
+ * The ModifyLiquidity event entity and the Tick entities are not written here
+ * — no DEX Prices endpoint reads them. The handler is kept because pool and
+ * token TVL are what the pricing model gates on: findNativePerToken picks a
+ * token's pricing route by ETH locked, and minimumNativeLocked and the
+ * imbalance guard both compare against it. Dropping this handler would
+ * silently degrade every price.
  */
 import { indexer } from "envio";
 import {
@@ -7,235 +14,134 @@ import {
   getAmount1,
 } from "../utils/liquidityMath/liquidityAmounts";
 import { convertTokenToDecimal, sanitizeBD } from "../utils";
-import { createInitialTick } from "../utils/tick";
 import { getChainConfig } from "../utils/chains";
 
-indexer.onEvent({ contract: "PoolManager", event: "ModifyLiquidity" }, async ({ event, context }) => {
-  // Get chain config for pools to skip
-  const chainConfig = getChainConfig(event.chainId);
+indexer.onEvent(
+  { contract: "PoolManager", event: "ModifyLiquidity" },
+  async ({ event, context }) => {
+    const chainConfig = getChainConfig(event.chainId);
 
-  // Check if this pool should be skipped
-  // NOTE: Subgraph only has this check in Initialize handler since skipped pools
-  // are never created, but we keep it here for safety in case we switch to
-  // getOrThrow APIs in the future and don't want exceptions thrown
-  if (chainConfig.poolsToSkip.includes(event.params.id)) {
-    return;
-  }
+    if (chainConfig.poolsToSkip.includes(event.params.id)) {
+      return;
+    }
 
-  const poolId = `${event.chainId}_${event.params.id}`;
+    const poolId = `${event.chainId}_${event.params.id}`;
 
-  // tick entities
-  const lowerTickId = poolId + "#" + BigInt(event.params.tickLower).toString();
-  const upperTickId = poolId + "#" + BigInt(event.params.tickUpper).toString();
+    const existingPool = await context.Pool.get(poolId);
+    if (!existingPool) return;
 
-  // Fetch pool + ticks concurrently
-  const [existingPool, existingLowerTick, existingUpperTick] =
-    await Promise.all([
-      context.Pool.get(poolId),
-      context.Tick.get(lowerTickId),
-      context.Tick.get(upperTickId),
-    ]);
-  if (!existingPool) return;
+    const isHookedPool =
+      existingPool.hooks !== "0x0000000000000000000000000000000000000000";
+    const hookStatsId = isHookedPool
+      ? `${event.chainId}_${existingPool.hooks}`
+      : undefined;
 
-  // Fetch tokens, bundle, poolManager, and hookStats concurrently
-  const isHookedPool =
-    existingPool.hooks !== "0x0000000000000000000000000000000000000000";
-  const hookStatsId = isHookedPool
-    ? `${event.chainId}_${existingPool.hooks}`
-    : undefined;
+    const [existingToken0, existingToken1, bundle, existingHookStats] =
+      await Promise.all([
+        context.Token.get(existingPool.token0),
+        context.Token.get(existingPool.token1),
+        context.Bundle.get(event.chainId.toString()),
+        hookStatsId ? context.HookStats.get(hookStatsId) : undefined,
+      ]);
+    if (!existingToken0 || !existingToken1 || !bundle) return;
 
-  const [existingToken0, existingToken1, bundle, existingPoolManager, existingHookStats] =
-    await Promise.all([
-      context.Token.get(existingPool.token0),
-      context.Token.get(existingPool.token1),
-      context.Bundle.get(event.chainId.toString()),
-      context.PoolManager.getOrThrow(
-        `${event.chainId}_${event.srcAddress}`
-      ),
-      hookStatsId ? context.HookStats.get(hookStatsId) : undefined,
-    ]);
-  if (!existingToken0 || !existingToken1 || !bundle) return;
+    if (context.isPreload) {
+      return;
+    }
 
-  if (context.isPreload) {
-    return;
-  }
-
-  // --- Tick updates ---
-  const lowerTickIdx = Number(event.params.tickLower);
-  const upperTickIdx = Number(event.params.tickUpper);
-  const amount = event.params.liquidityDelta;
-
-  let lowerTick =
-    existingLowerTick ??
-    createInitialTick(
-      lowerTickId,
-      lowerTickIdx,
-      poolId,
-      BigInt(event.block.timestamp),
-      BigInt(event.block.number)
+    const currTick = existingPool.tick ?? 0n;
+    const currSqrtPriceX96 = existingPool.sqrtPrice ?? 0n;
+    // Token amounts implied by the liquidity change
+    const amount0Raw = getAmount0(
+      event.params.tickLower,
+      event.params.tickUpper,
+      currTick,
+      event.params.liquidityDelta,
+      currSqrtPriceX96
     );
-  let upperTick =
-    existingUpperTick ??
-    createInitialTick(
-      upperTickId,
-      upperTickIdx,
-      poolId,
-      BigInt(event.block.timestamp),
-      BigInt(event.block.number)
+    const amount1Raw = getAmount1(
+      event.params.tickLower,
+      event.params.tickUpper,
+      currTick,
+      event.params.liquidityDelta,
+      currSqrtPriceX96
     );
+    const amount0 = convertTokenToDecimal(amount0Raw, existingToken0.decimals);
+    const amount1 = convertTokenToDecimal(amount1Raw, existingToken1.decimals);
 
-  lowerTick = {
-    ...lowerTick,
-    liquidityGross: lowerTick.liquidityGross + amount,
-    liquidityNet: lowerTick.liquidityNet + amount,
-  };
-  upperTick = {
-    ...upperTick,
-    liquidityGross: upperTick.liquidityGross + amount,
-    liquidityNet: upperTick.liquidityNet - amount,
-  };
+    let pool = {
+      ...existingPool,
+      txCount: existingPool.txCount + 1n,
+      lastUpdatedTimestamp: BigInt(event.block.timestamp),
+      lastUpdatedBlock: BigInt(event.block.number),
+      totalValueLockedToken0: existingPool.totalValueLockedToken0.plus(amount0),
+      totalValueLockedToken1: existingPool.totalValueLockedToken1.plus(amount1),
+    };
+    // Liquidity only moves if the position straddles the current tick
+    if (
+      pool.tick !== null &&
+      pool.tick !== undefined &&
+      event.params.tickLower <= pool.tick &&
+      event.params.tickUpper > pool.tick
+    ) {
+      pool = {
+        ...pool,
+        liquidity: pool.liquidity + event.params.liquidityDelta,
+      };
+    }
 
-  // Save tick entities
-  context.Tick.set(lowerTick);
-  context.Tick.set(upperTick);
+    let token0 = {
+      ...existingToken0,
+      txCount: existingToken0.txCount + 1n,
+      lastUpdatedTimestamp: BigInt(event.block.timestamp),
+      lastUpdatedBlock: BigInt(event.block.number),
+      totalValueLocked: existingToken0.totalValueLocked.plus(amount0),
+    };
+    let token1 = {
+      ...existingToken1,
+      txCount: existingToken1.txCount + 1n,
+      lastUpdatedTimestamp: BigInt(event.block.timestamp),
+      lastUpdatedBlock: BigInt(event.block.number),
+      totalValueLocked: existingToken1.totalValueLocked.plus(amount1),
+    };
 
-  // --- Pool, token, and manager updates ---
-  const currTick = existingPool.tick ?? 0n;
-  const currSqrtPriceX96 = existingPool.sqrtPrice ?? 0n;
-  // Calculate the token amounts from the liquidity change
-  const amount0Raw = getAmount0(
-    event.params.tickLower,
-    event.params.tickUpper,
-    currTick,
-    event.params.liquidityDelta,
-    currSqrtPriceX96
-  );
-  const amount1Raw = getAmount1(
-    event.params.tickLower,
-    event.params.tickUpper,
-    currTick,
-    event.params.liquidityDelta,
-    currSqrtPriceX96
-  );
-  // Convert to proper decimals
-  const amount0 = convertTokenToDecimal(amount0Raw, existingToken0.decimals);
-  const amount1 = convertTokenToDecimal(amount1Raw, existingToken1.decimals);
-
-  // Calculate amountUSD based on token prices
-  const amountUSD = amount0
-    .times(existingToken0.derivedETH)
-    .plus(amount1.times(existingToken1.derivedETH))
-    .times(bundle.ethPriceUSD);
-
-  // Update pool TVL and txCount
-  let pool = {
-    ...existingPool,
-    txCount: existingPool.txCount + 1n,
-    totalValueLockedToken0: existingPool.totalValueLockedToken0.plus(amount0),
-    totalValueLockedToken1: existingPool.totalValueLockedToken1.plus(amount1),
-  };
-  // Only update liquidity if position is in range and tick is initialized
-  if (
-    pool.tick !== null &&
-    pool.tick !== undefined &&
-    event.params.tickLower <= pool.tick &&
-    event.params.tickUpper > pool.tick
-  ) {
+    const currentPoolTvlUSD = pool.totalValueLockedUSD;
     pool = {
       ...pool,
-      liquidity: pool.liquidity + event.params.liquidityDelta,
+      totalValueLockedETH: pool.totalValueLockedToken0
+        .times(token0.derivedETH)
+        .plus(pool.totalValueLockedToken1.times(token1.derivedETH)),
     };
+    pool = {
+      ...pool,
+      totalValueLockedUSD: sanitizeBD(
+        pool.totalValueLockedETH.times(bundle.ethPriceUSD)
+      ),
+    };
+    token0 = {
+      ...token0,
+      totalValueLockedUSD: token0.totalValueLocked.times(
+        token0.derivedETH.times(bundle.ethPriceUSD)
+      ),
+    };
+    token1 = {
+      ...token1,
+      totalValueLockedUSD: token1.totalValueLocked.times(
+        token1.derivedETH.times(bundle.ethPriceUSD)
+      ),
+    };
+
+    if (isHookedPool && existingHookStats) {
+      context.HookStats.set({
+        ...existingHookStats,
+        totalValueLockedUSD: existingHookStats.totalValueLockedUSD
+          .minus(currentPoolTvlUSD)
+          .plus(pool.totalValueLockedUSD),
+      });
+    }
+
+    context.Pool.set(pool);
+    context.Token.set(token0);
+    context.Token.set(token1);
   }
-  // Update token TVL and txCount
-  let token0 = {
-    ...existingToken0,
-    txCount: existingToken0.txCount + 1n,
-    totalValueLocked: existingToken0.totalValueLocked.plus(amount0),
-  };
-  let token1 = {
-    ...existingToken1,
-    txCount: existingToken1.txCount + 1n,
-    totalValueLocked: existingToken1.totalValueLocked.plus(amount1),
-  };
-  // Store current pool TVL for later
-  const currentPoolTvlETH = pool.totalValueLockedETH;
-  const currentPoolTvlUSD = pool.totalValueLockedUSD;
-  // After updating token TVLs, calculate ETH and USD values
-  pool = {
-    ...pool,
-    totalValueLockedETH: pool.totalValueLockedToken0
-      .times(token0.derivedETH)
-      .plus(pool.totalValueLockedToken1.times(token1.derivedETH)),
-  };
-  pool = {
-    ...pool,
-    totalValueLockedUSD: sanitizeBD(
-      pool.totalValueLockedETH.times(bundle.ethPriceUSD)
-    ),
-  };
-  // Update token totalValueLockedUSD
-  token0 = {
-    ...token0,
-    totalValueLockedUSD: token0.totalValueLocked.times(
-      token0.derivedETH.times(bundle.ethPriceUSD)
-    ),
-  };
-  token1 = {
-    ...token1,
-    totalValueLockedUSD: token1.totalValueLocked.times(
-      token1.derivedETH.times(bundle.ethPriceUSD)
-    ),
-  };
-  // Update PoolManager
-  let poolManager = {
-    ...existingPoolManager,
-    txCount: existingPoolManager.txCount + 1n,
-    // Reset and recalculate TVL
-    totalValueLockedETH: existingPoolManager.totalValueLockedETH
-      .minus(currentPoolTvlETH)
-      .plus(pool.totalValueLockedETH),
-  };
-  poolManager = {
-    ...poolManager,
-    totalValueLockedUSD: poolManager.totalValueLockedETH.times(
-      bundle.ethPriceUSD
-    ),
-  };
-
-  // Create ModifyLiquidity entity
-  const modifyLiquidityId = `${event.chainId}_${event.transaction.hash}_${event.logIndex}`;
-  const modifyLiquidity = {
-    id: modifyLiquidityId,
-    transaction: event.transaction.hash,
-    timestamp: BigInt(event.block.timestamp),
-    pool_id: pool.id,
-    token0_id: token0.id,
-    token1_id: token1.id,
-    sender: event.params.sender,
-    origin: event.transaction.from || "NONE",
-    amount: event.params.liquidityDelta,
-    amount0: amount0,
-    amount1: amount1,
-    amountUSD: sanitizeBD(amountUSD),
-    tickLower: BigInt(event.params.tickLower),
-    tickUpper: BigInt(event.params.tickUpper),
-    logIndex: BigInt(event.logIndex),
-  };
-
-  // Check if this is a hooked pool and update HookStats
-  if (isHookedPool && existingHookStats) {
-    // Update the TVL for this hook
-    context.HookStats.set({
-      ...existingHookStats,
-      totalValueLockedUSD: existingHookStats.totalValueLockedUSD
-        .minus(currentPoolTvlUSD) // Remove old TVL
-        .plus(pool.totalValueLockedETH.times(bundle.ethPriceUSD)), // Add new TVL
-    });
-  }
-
-  context.ModifyLiquidity.set(modifyLiquidity);
-  context.PoolManager.set(poolManager);
-  context.Pool.set(pool);
-  context.Token.set(token0);
-  context.Token.set(token1);
-});
+);

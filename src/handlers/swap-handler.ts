@@ -1,5 +1,10 @@
 /*
- * Swap event handlers for Uniswap v4 pools
+ * Swap events for Uniswap v4 pools.
+ *
+ * The pricing core this calls (findNativePerToken, getTrackedAmountUSD,
+ * sqrtPriceX96ToTokenPrices and the imbalance guard) is carried over from
+ * enviodev/uniswap-v4-indexer unchanged. It was calibrated against production
+ * data and should not be adjusted here without the same evidence.
  */
 import { indexer, BigDecimal, type Swap } from "envio";
 import { getChainConfig } from "../utils/chains";
@@ -8,12 +13,20 @@ import { getTrackedAmountUSD, getNativePriceInUSD } from "../utils/pricing";
 import { safeDiv, sanitizeBD } from "../utils/index";
 import { findNativePerToken } from "../utils/pricing";
 import { sqrtPriceX96ToTokenPrices } from "../utils/pricing";
+import { DEX_UNISWAP_V4, ZERO_BD } from "../utils/constants";
+import {
+  loadPoolCandles,
+  loadTokenCandles,
+  poolCandleSpecs,
+  tokenCandleSpecs,
+  writePoolCandles,
+  writeTokenCandles,
+} from "../candles";
 
 indexer.onEvent({ contract: "PoolManager", event: "Swap" }, async ({ event, context }) => {
   const chainConfig = getChainConfig(event.chainId);
 
-  let [poolManager, pool, bundle, ethPriceUSD] = await Promise.all([
-    context.PoolManager.get(`${event.chainId}_${event.srcAddress}`),
+  let [pool, bundle, ethPriceUSD] = await Promise.all([
     context.Pool.get(`${event.chainId}_${event.params.id}`),
     context.Bundle.get(event.chainId.toString()),
     getNativePriceInUSD(
@@ -24,7 +37,7 @@ indexer.onEvent({ contract: "PoolManager", event: "Swap" }, async ({ event, cont
     ),
   ]);
 
-  if (!pool || !poolManager) {
+  if (!pool) {
     return;
   }
 
@@ -81,6 +94,19 @@ indexer.onEvent({ contract: "PoolManager", event: "Swap" }, async ({ event, cont
   token0 = { ...token0, derivedETH: sanitizeBD(token0DerivedETH) };
   token1 = { ...token1, derivedETH: sanitizeBD(token1DerivedETH) };
 
+  // Candle ids depend only on the timestamp and the subject id, so they are
+  // known here and the reads batch with everything else in the preload pass.
+  const timestamp = BigInt(event.block.timestamp);
+  const poolId = `${event.chainId}_${event.params.id}`;
+  const token0CandleSpecs = tokenCandleSpecs(token0.id, timestamp);
+  const token1CandleSpecs = tokenCandleSpecs(token1.id, timestamp);
+  const poolSpecs = poolCandleSpecs(poolId, timestamp);
+  const [token0Candles, token1Candles, poolCandles] = await Promise.all([
+    loadTokenCandles(context, token0CandleSpecs),
+    loadTokenCandles(context, token1CandleSpecs),
+    loadPoolCandles(context, poolSpecs),
+  ]);
+
   if (context.isPreload) {
     return;
   }
@@ -131,31 +157,26 @@ indexer.onEvent({ contract: "PoolManager", event: "Swap" }, async ({ event, cont
     .plus(amount1USD)
     .div(new BigDecimal("2"));
   // Calculate fees
+  // The fee actually paid, which is what upstream computed too — it assigned
+  // event.params.fee to pool.feeTier before using it. Here feeTier keeps the
+  // configured fee, so the swap fee is read from the event directly.
+  const swapFee = new BigDecimal(event.params.fee.toString());
   const feesETH = amountTotalETHTracked
-    .times(pool.feeTier.toString())
+    .times(swapFee)
     .div(new BigDecimal("1000000"));
   const feesUSD = amountTotalUSDTracked
-    .times(pool.feeTier.toString())
-    .div(new BigDecimal("1000000"));
-  // Calculate untracked fees
-  const feesUSDUntracked = amountTotalUSDUntracked.times(
-    new BigDecimal(pool.feeTier.toString()).div(new BigDecimal("1000000"))
-  );
-  // Calculate collected fees in tokens
-  const feesToken0 = amount0Abs
-    .times(pool.feeTier.toString())
-    .div(new BigDecimal("1000000"));
-  const feesToken1 = amount1Abs
-    .times(pool.feeTier.toString())
+    .times(swapFee)
     .div(new BigDecimal("1000000"));
   // Store current pool TVL values for later calculations
-  const currentPoolTvlETH = pool.totalValueLockedETH;
   const currentPoolTvlUSD = pool.totalValueLockedUSD;
-  // Update pool values (feeTier updated to actual swap fee for dynamic fee pools)
   pool = {
     ...pool,
-    feeTier: BigInt(event.params.fee),
+    // feeTier is the configured fee and is never rewritten; the per-swap
+    // effective fee goes to lastSwapFee and onto the Swap row.
+    lastSwapFee: BigInt(event.params.fee),
     txCount: pool.txCount + 1n,
+    lastUpdatedTimestamp: timestamp,
+    lastUpdatedBlock: BigInt(event.block.number),
     sqrtPrice: event.params.sqrtPriceX96,
     tick: event.params.tick,
     token0Price: prices[0],
@@ -168,10 +189,6 @@ indexer.onEvent({ contract: "PoolManager", event: "Swap" }, async ({ event, cont
     volumeUSD: sanitizeBD(pool.volumeUSD.plus(amountTotalUSDTracked)),
     untrackedVolumeUSD: pool.untrackedVolumeUSD.plus(amountTotalUSDUntracked),
     feesUSD: pool.feesUSD.plus(feesUSD),
-    feesUSDUntracked: pool.feesUSDUntracked.plus(feesUSDUntracked),
-    collectedFeesToken0: pool.collectedFeesToken0.plus(feesToken0),
-    collectedFeesToken1: pool.collectedFeesToken1.plus(feesToken1),
-    collectedFeesUSD: pool.collectedFeesUSD.plus(feesUSD),
   };
   pool = {
     ...pool,
@@ -185,73 +202,58 @@ indexer.onEvent({ contract: "PoolManager", event: "Swap" }, async ({ event, cont
       pool.totalValueLockedETH.times(bundle.ethPriceUSD)
     ),
   };
-  // Update token0 data
+  // Price in USD, written here so the price endpoint is one read. Uses the
+  // same bundle.ethPriceUSD as every other USD figure on this swap: the
+  // freshly read ethPriceUSD is written to Bundle at the end, so using it
+  // here would make Token.priceUSD disagree with Swap.amountUSD on the same
+  // swap. Upstream had the same one-swap lag.
+  const priceUSD0 = sanitizeBD(token0.derivedETH.times(bundle.ethPriceUSD));
+  const priceUSD1 = sanitizeBD(token1.derivedETH.times(bundle.ethPriceUSD));
+
   token0 = {
     ...token0,
+    priceUSD: priceUSD0,
+    isPriceable: token0.derivedETH.gt(ZERO_BD),
+    lastUpdatedTimestamp: timestamp,
+    lastUpdatedBlock: BigInt(event.block.number),
     volume: token0.volume.plus(amount0Abs),
     totalValueLocked: token0.totalValueLocked.plus(amount0),
     volumeUSD: token0.volumeUSD.plus(amountTotalUSDTracked),
-    untrackedVolumeUSD: token0.untrackedVolumeUSD.plus(amountTotalUSDUntracked),
     feesUSD: token0.feesUSD.plus(feesUSD),
     txCount: token0.txCount + 1n,
   };
-  // Update token1 data
   token1 = {
     ...token1,
+    priceUSD: priceUSD1,
+    isPriceable: token1.derivedETH.gt(ZERO_BD),
+    lastUpdatedTimestamp: timestamp,
+    lastUpdatedBlock: BigInt(event.block.number),
     volume: token1.volume.plus(amount1Abs),
     totalValueLocked: token1.totalValueLocked.plus(amount1),
     volumeUSD: token1.volumeUSD.plus(amountTotalUSDTracked),
-    untrackedVolumeUSD: token1.untrackedVolumeUSD.plus(amountTotalUSDUntracked),
     feesUSD: token1.feesUSD.plus(feesUSD),
     txCount: token1.txCount + 1n,
   };
-  // Update token totalValueLockedUSD
   token0 = {
     ...token0,
-    totalValueLockedUSD: token0.totalValueLocked.times(
-      token0.derivedETH.times(bundle.ethPriceUSD)
-    ),
+    totalValueLockedUSD: token0.totalValueLocked.times(priceUSD0),
   };
   token1 = {
     ...token1,
-    totalValueLockedUSD: token1.totalValueLocked.times(
-      token1.derivedETH.times(bundle.ethPriceUSD)
-    ),
+    totalValueLockedUSD: token1.totalValueLocked.times(priceUSD1),
   };
-  // Update PoolManager aggregates
-  poolManager = {
-    ...poolManager,
-    txCount: poolManager.txCount + 1n,
-    totalVolumeETH: poolManager.totalVolumeETH.plus(amountTotalETHTracked),
-    totalVolumeUSD: poolManager.totalVolumeUSD.plus(amountTotalUSDTracked),
-    untrackedVolumeUSD: poolManager.untrackedVolumeUSD.plus(
-      amountTotalUSDUntracked
-    ),
-    totalFeesETH: poolManager.totalFeesETH.plus(feesETH),
-    totalFeesUSD: poolManager.totalFeesUSD.plus(feesUSD),
-    // Reset and recalculate TVL
-    totalValueLockedETH: poolManager.totalValueLockedETH
-      .minus(currentPoolTvlETH)
-      .plus(pool.totalValueLockedETH),
-  };
-  // Then calculate USD value based on the updated ETH value
-  poolManager = {
-    ...poolManager,
-    totalValueLockedUSD: poolManager.totalValueLockedETH.times(
-      bundle.ethPriceUSD
-    ),
-  };
-
   // Use for USD swap amount
   const finalAmountUSD = amountTotalUSDTracked.gt(new BigDecimal("0"))
     ? amountTotalUSDTracked
     : amountTotalUSDUntracked;
 
-  let entity: Swap = {
+  const entity: Swap = {
     id: `${event.chainId}_${event.block.number}_${event.logIndex}`,
+    dex: DEX_UNISWAP_V4,
     transaction: event.transaction.hash,
-    timestamp: BigInt(event.block.timestamp),
-    pool: `${event.chainId}_${event.params.id}`,
+    blockNumber: BigInt(event.block.number),
+    timestamp: timestamp,
+    pool: poolId,
     token0_id: token0.id,
     token1_id: token1.id,
     sender: event.params.sender,
@@ -259,31 +261,53 @@ indexer.onEvent({ contract: "PoolManager", event: "Swap" }, async ({ event, cont
     amount0: amount0,
     amount1: amount1,
     amountUSD: sanitizeBD(finalAmountUSD),
+    priceUSD0: priceUSD0,
+    priceUSD1: priceUSD1,
     sqrtPriceX96: event.params.sqrtPriceX96,
     tick: event.params.tick,
     logIndex: BigInt(event.logIndex),
     fee: BigInt(event.params.fee),
   };
-  // Use immutability pattern
   context.Bundle.set({
     ...bundle,
     ethPriceUSD: sanitizeBD(ethPriceUSD),
   });
   context.Pool.set(pool);
-  context.PoolManager.set(poolManager);
   context.Swap.set(entity);
   context.Token.set(token0);
   context.Token.set(token1);
 
-  poolManager = {
-    ...poolManager,
-    numberOfSwaps: poolManager.numberOfSwaps + 1n,
-    hookedSwaps: isHookedPool
-      ? poolManager.hookedSwaps + 1n
-      : poolManager.hookedSwaps,
-  };
-
-  context.PoolManager.set(poolManager);
+  // OHLCV. Each side of the pool gets its own USD series; the pool gets one
+  // series of its token0 price in token1.
+  writeTokenCandles(context, {
+    specs: token0CandleSpecs,
+    existing: token0Candles,
+    tokenId: token0.id,
+    priceUSD: priceUSD0,
+    volumeToken: amount0Abs,
+    volumeUSD: sanitizeBD(finalAmountUSD),
+    timestamp,
+  });
+  writeTokenCandles(context, {
+    specs: token1CandleSpecs,
+    existing: token1Candles,
+    tokenId: token1.id,
+    priceUSD: priceUSD1,
+    volumeToken: amount1Abs,
+    volumeUSD: sanitizeBD(finalAmountUSD),
+    timestamp,
+  });
+  writePoolCandles(context, {
+    specs: poolSpecs,
+    existing: poolCandles,
+    poolId,
+    dex: DEX_UNISWAP_V4,
+    price: prices[0],
+    volumeToken0: amount0Abs,
+    volumeToken1: amount1Abs,
+    volumeUSD: sanitizeBD(finalAmountUSD),
+    timestamp,
+  });
 
   // After processing the swap, update HookStats if it's a hooked pool
   if (poolHookStats) {
@@ -296,7 +320,7 @@ indexer.onEvent({ contract: "PoolManager", event: "Swap" }, async ({ event, cont
     const feesToAdd = amountTotalUSDTracked.gt(new BigDecimal("0"))
       ? feesUSD
       : amountTotalUSDUntracked.times(
-          new BigDecimal(pool.feeTier.toString()).div(new BigDecimal("1000000"))
+          swapFee.div(new BigDecimal("1000000"))
         );
 
     context.HookStats.set({

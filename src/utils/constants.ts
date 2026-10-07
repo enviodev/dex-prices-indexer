@@ -15,3 +15,10 @@ export const Q96 = BigInt(2) ** BigInt(96);
 export const MaxUint256 = BigInt(
   "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
 );
+
+/**
+ * The DEX this indexer's handlers write. Stamped onto Pool, Swap and
+ * PoolCandle so a second DEX is an added contract and handler rather than a
+ * second repository. Values are the slugs the API exposes.
+ */
+export const DEX_UNISWAP_V4 = "uniswap-v4";

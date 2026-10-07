@@ -1,205 +1,180 @@
+# dex-prices-indexer schema
+#
+# Scoped to what the DEX Prices API serves. Postgres only: `storage` in
+# config.yaml sets `clickhouse: false` for every entity, so entity history is
+# pruned back to each chain's safe checkpoint rather than kept forever. The
+# candle entities restate it explicitly because for them it is load-bearing —
+# an open candle is rewritten on every swap in its bucket, which is the shape
+# that caused enviodev's September 2026 ClickHouse history-bloat incident.
+#
+# Dropped from the upstream uniswap-v4-indexer schema, with reasons:
+#   PoolManager   - no endpoint reads it, and it was rewritten twice per swap,
+#                   producing as many history rows as Swap itself
+#   Tick          - one row per pool per tick boundary; no endpoint reads
+#                   tick-level liquidity
+#   ModifyLiquidity - the event log. The handler stays: pool and token TVL
+#                   gate pricing route selection
+#   Position, Transfer, Subscribe, Unsubscribe - PositionManager NFT views
+
+# A trade. Written once, never updated.
 type Swap
-  @storage(postgres: true, clickhouse: true)
-  @index(fields: ["pool", ["timestamp", "DESC"]]) {
-  id: ID!
-  transaction: String! # Instead of Transaction reference
+  @index(fields: ["pool", ["timestamp", "DESC"]])
+  @index(fields: ["token0", ["timestamp", "DESC"]])
+  @index(fields: ["token1", ["timestamp", "DESC"]]) {
+  id: ID! # {chainId}_{blockNumber}_{logIndex}
+  dex: String! @index
+  transaction: String!
+  blockNumber: BigInt!
   timestamp: BigInt! @index
-  pool: String! # Instead of Pool reference
-  token0: Token! # Changed from String to Token reference
-  token1: Token! # Changed from String to Token reference
-  sender: String! # Instead of Bytes
-  origin: String! # Instead of Bytes
+  pool: String!
+  token0: Token!
+  token1: Token!
+  sender: String!
+  origin: String! # the EOA that initiated the txn
   amount0: BigDecimal!
   amount1: BigDecimal!
   amountUSD: BigDecimal!
+  # Each token's USD price at this swap, from the derivedETH and ethPriceUSD
+  # in force when it was processed. The only honest per-swap USD price: the
+  # pool's sqrtPriceX96 gives a ratio, and converting it later is impossible
+  # because derivedETH and ethPriceUSD are not historised.
+  priceUSD0: BigDecimal!
+  priceUSD1: BigDecimal!
   sqrtPriceX96: BigInt!
   tick: BigInt!
   logIndex: BigInt!
-  # Fee paid for this swap in hundredths of a bip (i.e. raw PoolManager Swap.fee).
-  # For dynamic-fee pools this captures the per-swap effective fee, which would
-  # otherwise be lost when pool.feeTier is overwritten by the next swap.
+  # Fee actually paid for this swap, in hundredths of a bip. For dynamic-fee
+  # pools this is the per-swap effective fee, not Pool.feeTier.
   fee: BigInt!
 }
 
-type PoolManager @storage(postgres: true, clickhouse: true) {
-  id: ID!
-  poolCount: BigInt!
-  txCount: BigInt!
-  totalVolumeUSD: BigDecimal!
-  totalVolumeETH: BigDecimal!
-  totalFeesUSD: BigDecimal!
-  totalFeesETH: BigDecimal!
-  untrackedVolumeUSD: BigDecimal!
-  totalValueLockedUSD: BigDecimal!
-  totalValueLockedETH: BigDecimal!
-  totalValueLockedUSDUntracked: BigDecimal!
-  totalValueLockedETHUntracked: BigDecimal!
-  owner: String!
-  numberOfSwaps: BigInt! # total swaps on network
-  hookedPools: BigInt! # number of pools with hooks
-  hookedSwaps: BigInt! # number of swaps through hooked pools
-}
-
 type Pool
-  @storage(postgres: true, clickhouse: true)
+  @index(fields: ["token0", ["volumeUSD", "DESC"]])
+  @index(fields: ["token1", ["volumeUSD", "DESC"]])
   @index(fields: ["hooks", ["totalValueLockedUSD", "DESC"]]) {
-  id: ID!
-  name: String!
+  id: ID! # {chainId}_{poolId}. Opaque: a V4 bytes32 pool id or, for a future
+  # DEX, a pool address.
+  dex: String! @index
   createdAtTimestamp: BigInt! @index
   createdAtBlockNumber: BigInt!
-  token0: String! # Instead of Token reference
-  token1: String! # Instead of Token reference
+  lastUpdatedTimestamp: BigInt!
+  lastUpdatedBlock: BigInt!
+  token0: String!
+  token1: String!
+  # The fee the pool was initialised with. Never overwritten — upstream wrote
+  # the last swap's fee here, which lost the configured fee on dynamic-fee
+  # pools.
   feeTier: BigInt!
+  # Fee observed on the most recent swap. Equals feeTier for a static-fee pool.
+  lastSwapFee: BigInt!
   liquidity: BigInt!
   sqrtPrice: BigInt!
+  tick: BigInt
+  tickSpacing: BigInt! # Uniswap V4 specific
+  hooks: String! # Uniswap V4 specific; the zero address for a DEX without hooks
   token0Price: BigDecimal!
   token1Price: BigDecimal!
-  tick: BigInt
-  tickSpacing: BigInt!
-  observationIndex: BigInt!
   volumeToken0: BigDecimal!
   volumeToken1: BigDecimal!
   volumeUSD: BigDecimal! @index
   untrackedVolumeUSD: BigDecimal!
   feesUSD: BigDecimal!
-  feesUSDUntracked: BigDecimal!
   txCount: BigInt! @index
-  collectedFeesToken0: BigDecimal!
-  collectedFeesToken1: BigDecimal!
-  collectedFeesUSD: BigDecimal!
   totalValueLockedToken0: BigDecimal!
   totalValueLockedToken1: BigDecimal!
   totalValueLockedETH: BigDecimal!
   totalValueLockedUSD: BigDecimal! @index
-  totalValueLockedUSDUntracked: BigDecimal!
-  liquidityProviderCount: BigInt!
-  hooks: String!
-  # derived fields
-  ticks: [Tick!]! @derivedFrom(field: "pool")
 }
 
-type Tick
-  @storage(postgres: true, clickhouse: true)
-  @index(fields: ["pool", "tickIdx"]) {
-  id: ID! # <pool address>#<tickIdx>
-  pool: Pool! # Pointer back to Pool
-  tickIdx: BigInt!
-  liquidityGross: BigInt! # abs liquidity at this boundary
-  liquidityNet: BigInt! # delta when price crosses boundary
-  price0: BigDecimal! # Optional – 1.0001^tickIdx
-  price1: BigDecimal! # Optional inverse price
-  createdAtTimestamp: BigInt!
-  createdAtBlockNumber: BigInt!
-}
-
-type Token @storage(postgres: true, clickhouse: true) {
-  id: ID!
+type Token {
+  id: ID! # {chainId}_{address}
   symbol: String!
   name: String!
   decimals: BigInt!
   totalSupply: BigInt!
+  # Price in the chain's native token, and the same price in USD. priceUSD is
+  # written here rather than multiplied at request time so the price endpoint
+  # is one read.
+  derivedETH: BigDecimal!
+  priceUSD: BigDecimal!
+  # False when no whitelisted pricing route reaches this token, so the API can
+  # answer "no price" instead of returning zero.
+  isPriceable: Boolean! @index
+  lastUpdatedTimestamp: BigInt!
+  lastUpdatedBlock: BigInt!
   volume: BigDecimal!
   volumeUSD: BigDecimal!
-  untrackedVolumeUSD: BigDecimal!
   feesUSD: BigDecimal!
   txCount: BigInt!
   poolCount: BigInt!
   totalValueLocked: BigDecimal!
   totalValueLockedUSD: BigDecimal!
-  totalValueLockedUSDUntracked: BigDecimal!
-  derivedETH: BigDecimal!
 }
 
-# Pools a token can be priced through, written on pool Initialize and read by
-# findNativePerToken. Kept off Token and out of ClickHouse on purpose:
-# ClickHouse stores every entity change forever, Token is rewritten on every
-# swap, and this array (~1,600 ids for WETH/USDC) was ~80% of that database.
-type TokenWhitelistPools @storage(postgres: true, clickhouse: false) {
+# Pools a token can be priced through, written on Initialize and read by
+# findNativePerToken. Kept as its own entity rather than an array on Token:
+# as an array it was rewritten on every swap and became ~80% of the upstream
+# project's ClickHouse database (enviodev/uniswap-v4-indexer#67).
+type TokenWhitelistPools {
   id: ID! # same id as the Token
   pools: [String!]!
 }
 
-# stores for USD calculations
-type Bundle @storage(postgres: true, clickhouse: true) {
+# The chain's native token price in USD. One row per chain, id = chainId.
+type Bundle {
   id: ID!
-  # price of ETH in usd
   ethPriceUSD: BigDecimal!
 }
 
-type HookStats @storage(postgres: true, clickhouse: true) {
-  id: ID! # hook address
+# Uniswap V4 specific.
+type HookStats {
+  id: ID! # {chainId}_{hookAddress}
   numberOfPools: BigInt!
   numberOfSwaps: BigInt!
   firstPoolCreatedAt: BigInt!
-  totalValueLockedUSD: BigDecimal! @index # Total TVL across all pools using this hook
-  totalVolumeUSD: BigDecimal! # Total volume across all pools using this hook
-  untrackedVolumeUSD: BigDecimal! # Untracked volume for non-whitelisted tokens
-  totalFeesUSD: BigDecimal! # Total fees across all pools using this hook
+  totalValueLockedUSD: BigDecimal! @index
+  totalVolumeUSD: BigDecimal!
+  untrackedVolumeUSD: BigDecimal!
+  totalFeesUSD: BigDecimal!
 }
 
-type Position @storage(postgres: true, clickhouse: true) {
-  id: ID! # <chainId>_<tokenId>
-  tokenId: BigInt! @index
-  owner: String! @index # address of current owner
-  origin: String! # the EOA that minted the position
-  createdAtTimestamp: BigInt!
-  # derived fields
-  subscriptions: [Subscribe!]! @derivedFrom(field: "position")
-  unsubscriptions: [Unsubscribe!]! @derivedFrom(field: "position")
-  transfers: [Transfer!]! @derivedFrom(field: "position")
+# OHLCV for a token's USD price. A row exists only for a bucket that had a
+# swap, so the row count is bounded by swaps, not by tokens x buckets.
+type TokenCandle
+  @storage(postgres: true, clickhouse: false)
+  @index(fields: ["token", "interval", ["bucketStart", "DESC"]]) {
+  id: ID! # {chainId}_{tokenAddress}_{interval}_{bucketStart}
+  token: Token!
+  interval: String! # 1m | 5m | 1h | 1d
+  bucketStart: BigInt!
+  open: BigDecimal!
+  high: BigDecimal!
+  low: BigDecimal!
+  close: BigDecimal!
+  volumeToken: BigDecimal!
+  volumeUSD: BigDecimal!
+  swapCount: BigInt!
+  lastUpdatedTimestamp: BigInt!
 }
 
-type Transfer @storage(postgres: true, clickhouse: true) {
-  id: ID!
-  tokenId: BigInt! @index
-  from: String! # address of previous owner
-  to: String! # address of new owner
-  transaction: String! # Instead of Transaction reference
-  logIndex: BigInt!
-  timestamp: BigInt! @index
-  origin: String! # the EOA that initiated the tx
-  position: Position!
-}
-
-type Subscribe @storage(postgres: true, clickhouse: true) {
-  id: ID!
-  tokenId: BigInt! @index
-  address: String! # address of subscriber
-  transaction: String! # Instead of Transaction reference
-  logIndex: BigInt!
-  timestamp: BigInt! @index
-  origin: String! # the EOA that initiated the tx
-  position: Position!
-}
-
-type Unsubscribe @storage(postgres: true, clickhouse: true) {
-  id: ID!
-  tokenId: BigInt! @index
-  address: String! # address of unsubscriber
-  transaction: String! # Instead of Transaction reference
-  logIndex: BigInt!
-  timestamp: BigInt! @index
-  origin: String! # the EOA that initiated the tx
-  position: Position!
-}
-
-type ModifyLiquidity
-  @storage(postgres: true, clickhouse: true)
-  @index(fields: ["pool", ["timestamp", "DESC"]])
-  @index(fields: ["pool", "transaction"]) {
-  id: ID!
-  transaction: String! # Instead of Transaction reference
-  timestamp: BigInt! @index
-  pool: Pool! # Instead of Pool reference
-  token0: Token! # Token reference like in Swap entity
-  token1: Token! # Token reference like in Swap entity
-  sender: String! # Instead of Bytes
-  origin: String! # Instead of Bytes - the EOA that initiated the txn
-  amount: BigInt! # amount of liquidity modified
-  amount0: BigDecimal! # amount of token 0 modified
-  amount1: BigDecimal! # amount of token 1 modified
-  amountUSD: BigDecimal! @index # derived amount based on available prices of tokens
-  tickLower: BigInt! # lower tick of the position
-  tickUpper: BigInt! # upper tick of the position
-  logIndex: BigInt! # index within the txn
+# OHLCV for a pool's token0-in-token1 price, plus the pool's volume in the
+# bucket. 1h and 1d only: per-pool fine granularity serves no endpoint, and
+# summing 24 of the 1h rows is the source for 24-hour pool volume.
+type PoolCandle
+  @storage(postgres: true, clickhouse: false)
+  @index(fields: ["pool", "interval", ["bucketStart", "DESC"]]) {
+  id: ID! # {chainId}_{poolId}_{interval}_{bucketStart}
+  pool: String!
+  dex: String!
+  interval: String! # 1h | 1d
+  bucketStart: BigInt!
+  open: BigDecimal!
+  high: BigDecimal!
+  low: BigDecimal!
+  close: BigDecimal!
+  volumeToken0: BigDecimal!
+  volumeToken1: BigDecimal!
+  volumeUSD: BigDecimal!
+  swapCount: BigInt!
+  lastUpdatedTimestamp: BigInt!
 }

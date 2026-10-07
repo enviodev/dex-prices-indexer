@@ -1,5 +1,5 @@
 /*
- * Initialize event handlers for Uniswap v4 pools
+ * Pool creation for Uniswap v4.
  */
 
 import { indexer, BigDecimal, type EvmOnEventContext } from "envio";
@@ -8,6 +8,7 @@ import { sqrtPriceX96ToTokenPrices } from "../utils/pricing";
 import { getTokenMetadata } from "../utils/tokenMetadata";
 import { findNativePerToken } from "../utils/pricing";
 import { sanitizeBD } from "../utils";
+import { ADDRESS_ZERO, DEX_UNISWAP_V4, ZERO_BD } from "../utils/constants";
 
 /** Appends a pool to a token's pricing whitelist (TokenWhitelistPools). */
 async function addWhitelistPool(
@@ -22,239 +23,213 @@ async function addWhitelistPool(
   });
 }
 
-indexer.onEvent({ contract: "PoolManager", event: "Initialize" }, async ({ event, context }) => {
-  // Get chain config for whitelist tokens and pools to skip
-  const chainConfig = getChainConfig(event.chainId);
+indexer.onEvent(
+  { contract: "PoolManager", event: "Initialize" },
+  async ({ event, context }) => {
+    const chainConfig = getChainConfig(event.chainId);
 
-  // Check if this pool should be skipped (similar to subgraph implementation)
-  if (chainConfig.poolsToSkip.includes(event.params.id)) {
-    return;
-  }
+    if (chainConfig.poolsToSkip.includes(event.params.id)) {
+      return;
+    }
 
-  // Define isHookedPool at the start
-  const isHookedPool =
-    event.params.hooks !== "0x0000000000000000000000000000000000000000";
+    const isHookedPool = event.params.hooks !== ADDRESS_ZERO;
+    const timestamp = BigInt(event.block.timestamp);
+    const blockNumber = BigInt(event.block.number);
 
-  let poolManager = await context.PoolManager.get(
-    `${event.chainId}_${event.srcAddress}`
-  );
-  if (!poolManager) {
-    poolManager = {
-      id: `${event.chainId}_${event.srcAddress}`,
-      poolCount: 1n,
-      txCount: 0n,
-      totalVolumeUSD: new BigDecimal(0),
-      totalVolumeETH: new BigDecimal(0),
-      totalFeesUSD: new BigDecimal(0),
-      totalFeesETH: new BigDecimal(0),
-      untrackedVolumeUSD: new BigDecimal(0),
-      totalValueLockedUSD: new BigDecimal(0),
-      totalValueLockedETH: new BigDecimal(0),
-      totalValueLockedUSDUntracked: new BigDecimal(0),
-      totalValueLockedETHUntracked: new BigDecimal(0),
-      owner: event.srcAddress,
-      numberOfSwaps: 0n,
-      hookedPools: 0n,
-      hookedSwaps: 0n,
-    };
-    context.Bundle.set({
-      id: event.chainId.toString(),
-      ethPriceUSD: new BigDecimal("0"),
-    });
-  } else {
-    poolManager = {
-      ...poolManager,
-      poolCount: poolManager.poolCount + 1n,
-    };
-  }
+    // The chain's native-price row. Upstream created this as a side effect of
+    // creating the PoolManager entity, which this schema does not have, so it
+    // is created here instead.
+    const bundle = await context.Bundle.get(event.chainId.toString());
+    if (!bundle) {
+      context.Bundle.set({
+        id: event.chainId.toString(),
+        ethPriceUSD: ZERO_BD,
+      });
+    }
 
-  // Update or create HookStats if this is a hooked pool
-  if (isHookedPool) {
-    poolManager = {
-      ...poolManager,
-      hookedPools: poolManager.hookedPools + 1n,
-    };
+    if (isHookedPool) {
+      const hookStatsId = `${event.chainId}_${event.params.hooks}`;
+      let hookStats = await context.HookStats.get(hookStatsId);
 
-    const hookStatsId = `${event.chainId}_${event.params.hooks}`;
-    let hookStats = await context.HookStats.get(hookStatsId);
+      if (!hookStats) {
+        hookStats = {
+          id: hookStatsId,
+          numberOfPools: 0n,
+          numberOfSwaps: 0n,
+          firstPoolCreatedAt: timestamp,
+          totalValueLockedUSD: ZERO_BD,
+          totalVolumeUSD: ZERO_BD,
+          untrackedVolumeUSD: ZERO_BD,
+          totalFeesUSD: ZERO_BD,
+        };
+      }
 
-    if (!hookStats) {
-      hookStats = {
-        id: hookStatsId,
-        numberOfPools: 0n,
-        numberOfSwaps: 0n,
-        firstPoolCreatedAt: BigInt(event.block.timestamp),
-        totalValueLockedUSD: new BigDecimal("0"),
-        totalVolumeUSD: new BigDecimal("0"),
-        untrackedVolumeUSD: new BigDecimal("0"),
-        totalFeesUSD: new BigDecimal("0"),
+      context.HookStats.set({
+        ...hookStats,
+        numberOfPools: hookStats.numberOfPools + 1n,
+      });
+    }
+
+    const token0Id = `${event.chainId}_${event.params.currency0.toLowerCase()}`;
+    let token0 = await context.Token.get(token0Id);
+    if (!token0) {
+      const metadata = await context.effect(getTokenMetadata, {
+        address: event.params.currency0,
+        chainId: event.chainId,
+      });
+      token0 = {
+        id: token0Id,
+        symbol: metadata.symbol,
+        name: metadata.name,
+        decimals: BigInt(metadata.decimals),
+        totalSupply: 0n,
+        derivedETH: ZERO_BD,
+        priceUSD: ZERO_BD,
+        isPriceable: false,
+        lastUpdatedTimestamp: timestamp,
+        lastUpdatedBlock: blockNumber,
+        volume: ZERO_BD,
+        volumeUSD: ZERO_BD,
+        feesUSD: ZERO_BD,
+        txCount: 0n,
+        poolCount: 1n,
+        totalValueLocked: ZERO_BD,
+        totalValueLockedUSD: ZERO_BD,
+      };
+    } else {
+      token0 = {
+        ...token0,
+        poolCount: token0.poolCount + 1n,
       };
     }
 
-    hookStats = {
-      ...hookStats,
-      numberOfPools: hookStats.numberOfPools + 1n,
-    };
+    const token1Id = `${event.chainId}_${event.params.currency1.toLowerCase()}`;
+    let token1 = await context.Token.get(token1Id);
+    if (!token1) {
+      const metadata = await context.effect(getTokenMetadata, {
+        address: event.params.currency1,
+        chainId: event.chainId,
+      });
+      token1 = {
+        id: token1Id,
+        symbol: metadata.symbol,
+        name: metadata.name,
+        decimals: BigInt(metadata.decimals),
+        totalSupply: 0n,
+        derivedETH: ZERO_BD,
+        priceUSD: ZERO_BD,
+        isPriceable: false,
+        lastUpdatedTimestamp: timestamp,
+        lastUpdatedBlock: blockNumber,
+        volume: ZERO_BD,
+        volumeUSD: ZERO_BD,
+        feesUSD: ZERO_BD,
+        txCount: 0n,
+        poolCount: 1n,
+        totalValueLocked: ZERO_BD,
+        totalValueLockedUSD: ZERO_BD,
+      };
+    } else {
+      token1 = {
+        ...token1,
+        poolCount: token1.poolCount + 1n,
+      };
+    }
 
-    context.HookStats.set(hookStats);
-  }
+    const poolId = `${event.chainId}_${event.params.id}`;
 
-  // Create or get token0
-  const token0Id = `${event.chainId}_${event.params.currency0.toLowerCase()}`;
-  let token0 = await context.Token.get(token0Id);
-  if (!token0) {
-    const metadata = await context.effect(getTokenMetadata, {
-      address: event.params.currency0,
-      chainId: event.chainId,
-    });
-    token0 = {
-      id: token0Id,
-      symbol: metadata.symbol,
-      name: metadata.name,
-      decimals: BigInt(metadata.decimals),
-      totalSupply: 0n,
-      volume: new BigDecimal("0"),
-      volumeUSD: new BigDecimal("0"),
-      untrackedVolumeUSD: new BigDecimal("0"),
-      feesUSD: new BigDecimal("0"),
-      txCount: 0n,
-      poolCount: 1n,
-      totalValueLocked: new BigDecimal("0"),
-      totalValueLockedUSD: new BigDecimal("0"),
-      totalValueLockedUSDUntracked: new BigDecimal("0"),
-      derivedETH: new BigDecimal("0"),
-    };
-  } else {
-    token0 = {
-      ...token0,
-      poolCount: token0.poolCount + 1n,
-    };
-  }
+    // A pool is a pricing route for the token on the other side of a
+    // whitelisted token.
+    if (
+      chainConfig.whitelistTokens.includes(event.params.currency0.toLowerCase())
+    ) {
+      await addWhitelistPool(context, token1Id, poolId);
+    }
 
-  // Create or get token1
-  const token1Id = `${event.chainId}_${event.params.currency1.toLowerCase()}`;
-  let token1 = await context.Token.get(token1Id);
-  if (!token1) {
-    const metadata = await context.effect(getTokenMetadata, {
-      address: event.params.currency1,
-      chainId: event.chainId,
-    });
-    token1 = {
-      id: token1Id,
-      symbol: metadata.symbol,
-      name: metadata.name,
-      decimals: BigInt(metadata.decimals),
-      totalSupply: 0n,
-      volume: new BigDecimal("0"),
-      volumeUSD: new BigDecimal("0"),
-      untrackedVolumeUSD: new BigDecimal("0"),
-      feesUSD: new BigDecimal("0"),
-      txCount: 0n,
-      poolCount: 1n,
-      totalValueLocked: new BigDecimal("0"),
-      totalValueLockedUSD: new BigDecimal("0"),
-      totalValueLockedUSDUntracked: new BigDecimal("0"),
-      derivedETH: new BigDecimal("0"),
-    };
-  } else {
-    token1 = {
-      ...token1,
-      poolCount: token1.poolCount + 1n,
-    };
-  }
+    if (
+      chainConfig.whitelistTokens.includes(event.params.currency1.toLowerCase())
+    ) {
+      await addWhitelistPool(context, token0Id, poolId);
+    }
 
-  const poolId = `${event.chainId}_${event.params.id}`;
-
-  // Update whitelist pools first
-  if (
-    chainConfig.whitelistTokens.includes(event.params.currency0.toLowerCase())
-  ) {
-    await addWhitelistPool(context, token1Id, poolId);
-  }
-
-  if (
-    chainConfig.whitelistTokens.includes(event.params.currency1.toLowerCase())
-  ) {
-    await addWhitelistPool(context, token0Id, poolId);
-  }
-
-  // Now update derivedETH values
-  token0 = {
-    ...token0,
-    derivedETH: sanitizeBD(
-      await findNativePerToken(
+    const [token0DerivedETH, token1DerivedETH] = await Promise.all([
+      findNativePerToken(
         context,
         token0,
         chainConfig.wrappedNativeAddress,
         chainConfig.stablecoinAddresses,
         chainConfig.minimumNativeLocked
-      )
-    ),
-  };
-
-  token1 = {
-    ...token1,
-    derivedETH: sanitizeBD(
-      await findNativePerToken(
+      ),
+      findNativePerToken(
         context,
         token1,
         chainConfig.wrappedNativeAddress,
         chainConfig.stablecoinAddresses,
         chainConfig.minimumNativeLocked
-      )
-    ),
-  };
+      ),
+    ]);
+    token0 = { ...token0, derivedETH: sanitizeBD(token0DerivedETH) };
+    token1 = { ...token1, derivedETH: sanitizeBD(token1DerivedETH) };
 
-  if (context.isPreload) {
-    return;
+    if (context.isPreload) {
+      return;
+    }
+
+    const ethPriceUSD = bundle?.ethPriceUSD ?? ZERO_BD;
+    token0 = {
+      ...token0,
+      priceUSD: sanitizeBD(token0.derivedETH.times(ethPriceUSD)),
+      isPriceable: token0.derivedETH.gt(ZERO_BD),
+      lastUpdatedTimestamp: timestamp,
+      lastUpdatedBlock: blockNumber,
+    };
+    token1 = {
+      ...token1,
+      priceUSD: sanitizeBD(token1.derivedETH.times(ethPriceUSD)),
+      isPriceable: token1.derivedETH.gt(ZERO_BD),
+      lastUpdatedTimestamp: timestamp,
+      lastUpdatedBlock: blockNumber,
+    };
+
+    const prices = sqrtPriceX96ToTokenPrices(
+      event.params.sqrtPriceX96,
+      token0,
+      token1,
+      chainConfig.nativeTokenDetails
+    );
+
+    context.Pool.set({
+      id: poolId,
+      dex: DEX_UNISWAP_V4,
+      createdAtTimestamp: timestamp,
+      createdAtBlockNumber: blockNumber,
+      lastUpdatedTimestamp: timestamp,
+      lastUpdatedBlock: blockNumber,
+      token0: token0Id,
+      token1: token1Id,
+      // The configured fee. Never rewritten; the per-swap effective fee of a
+      // dynamic-fee pool lands on lastSwapFee and on each Swap row.
+      feeTier: BigInt(event.params.fee),
+      lastSwapFee: BigInt(event.params.fee),
+      liquidity: 0n,
+      sqrtPrice: event.params.sqrtPriceX96,
+      tick: event.params.tick,
+      tickSpacing: BigInt(event.params.tickSpacing),
+      hooks: event.params.hooks,
+      token0Price: prices[0],
+      token1Price: prices[1],
+      volumeToken0: ZERO_BD,
+      volumeToken1: ZERO_BD,
+      volumeUSD: ZERO_BD,
+      untrackedVolumeUSD: ZERO_BD,
+      feesUSD: ZERO_BD,
+      txCount: 0n,
+      totalValueLockedToken0: ZERO_BD,
+      totalValueLockedToken1: ZERO_BD,
+      totalValueLockedETH: ZERO_BD,
+      totalValueLockedUSD: ZERO_BD,
+    });
+    context.Token.set(token0);
+    context.Token.set(token1);
   }
-
-  // Calculate initial prices
-  const prices = sqrtPriceX96ToTokenPrices(
-    event.params.sqrtPriceX96,
-    token0,
-    token1,
-    chainConfig.nativeTokenDetails
-  );
-
-  const feeBps = Number(event.params.fee) / 10000; // Convert to percentage (fee is in bps)
-  const poolName = `${token0.symbol} / ${token1.symbol} - ${feeBps}%`;
-
-  // Create new pool with prices
-  context.Pool.set({
-    id: poolId,
-    name: poolName,
-    createdAtTimestamp: BigInt(event.block.timestamp),
-    createdAtBlockNumber: BigInt(event.block.number),
-    token0: token0Id,
-    token1: token1Id,
-    feeTier: BigInt(event.params.fee),
-    liquidity: 0n,
-    sqrtPrice: event.params.sqrtPriceX96,
-    token0Price: prices[0],
-    token1Price: prices[1],
-    tick: event.params.tick,
-    tickSpacing: BigInt(event.params.tickSpacing),
-    observationIndex: 0n,
-    volumeToken0: new BigDecimal(0),
-    volumeToken1: new BigDecimal(0),
-    volumeUSD: new BigDecimal(0),
-    untrackedVolumeUSD: new BigDecimal(0),
-    feesUSD: new BigDecimal("0"),
-    feesUSDUntracked: new BigDecimal("0"),
-    txCount: 0n,
-    collectedFeesToken0: new BigDecimal(0),
-    collectedFeesToken1: new BigDecimal(0),
-    collectedFeesUSD: new BigDecimal(0),
-    totalValueLockedToken0: new BigDecimal(0),
-    totalValueLockedToken1: new BigDecimal(0),
-    totalValueLockedETH: new BigDecimal(0),
-    totalValueLockedUSD: new BigDecimal(0),
-    totalValueLockedUSDUntracked: new BigDecimal(0),
-    liquidityProviderCount: 0n,
-    hooks: event.params.hooks,
-  });
-  context.PoolManager.set(poolManager);
-  context.Token.set(token0);
-  context.Token.set(token1);
-});
+);
