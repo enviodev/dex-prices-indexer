@@ -11,10 +11,26 @@ inconvenience.
 
 ```bash
 cp .env.example .env     # set ENVIO_API_TOKEN at minimum
-pnpm i
-pnpm build               # tsc --noEmit
+pnpm i --ignore-workspace
+pnpm build               # tsc
 pnpm test -u             # -u records the empty indexer.test.ts snapshot
 ```
+
+**Node version.** `engines` asks for `>=22.15.0 <23.0.0 || >=23.7.0`, and the
+gap in the middle is deliberate. envio 3.14.0 declares `>=22.15.0` and checks
+it at runtime, but its check compares version parts in order, so it reads any
+Node 23.x as newer than 22.15 and lets it through. `envio/src/TsModuleHooks.mjs`
+then calls `module.setSourceMapsSupport`, which only exists in Node 22.14+ and
+23.7+. On Node 23.0 to 23.6 envio therefore passes its own gate and dies with
+`TypeError: module.setSourceMapsSupport is not a function` — observed here on
+Node 23.6.1. Worth reporting upstream. CI pins Node 24, which is unaffected.
+
+**`--ignore-workspace`** is for this checkout's surroundings, not the repo: if a
+`pnpm-workspace.yaml` exists in a parent directory, a plain `pnpm install`
+resolves against that workspace and installs nothing here, reporting
+"Already up to date". Platform-specific optional dependencies (rollup's native
+binding) also need the install to run under the Node version you will test
+with.
 
 There is no separate codegen step: envio >= 3.14 runs codegen as part of
 `envio start` and `envio dev`. The `pnpm codegen` script is still there if you

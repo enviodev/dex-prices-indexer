@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "type": "module",
   "engines": {
-    "node": ">=22.0.0"
+    "node": ">=22.15.0 <23.0.0 || >=23.7.0"
   },
   "scripts": {
     "clean": "tsc --clean",

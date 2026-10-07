@@ -26,5 +26,7 @@ describe.skipIf(!process.env.ENVIO_API_TOKEN)("dex-prices-indexer", () => {
       }),
       "A ModifyLiquidity event whose pool has no prior Initialize must write nothing. The PositionManager mint in the same block is no longer indexed."
     ).toMatchInlineSnapshot();
-  });
+    // Fetches real mainnet data over HyperSync, so vitest's 5s default is not
+    // enough.
+  }, 120_000);
 });

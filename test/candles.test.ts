@@ -14,7 +14,7 @@ describe("bucketStart", () => {
   it("floors to the interval", () => {
     expect(bucketStart(TS, 60n)).toBe(1791466620n);
     expect(bucketStart(TS, 300n)).toBe(1791466500n);
-    expect(bucketStart(TS, 3600n)).toBe(1791465600n);
+    expect(bucketStart(TS, 3600n)).toBe(1791464400n);
     expect(bucketStart(TS, 86400n)).toBe(1791417600n);
   });
 
