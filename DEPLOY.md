@@ -5,17 +5,22 @@ through section 1 first.
 
 ## 1. Verify the build (blocking)
 
-Nothing below matters until this passes. The cloud build runs `codegen` in a
+Nothing below matters until this passes. The cloud build generates code in a
 Dagger job, so a type error here is a failed deployment there, not a local
 inconvenience.
 
 ```bash
 cp .env.example .env     # set ENVIO_API_TOKEN at minimum
 pnpm i
-pnpm codegen
 pnpm build               # tsc --noEmit
 pnpm test -u             # -u records the empty indexer.test.ts snapshot
 ```
+
+There is no separate codegen step: envio >= 3.14 runs codegen as part of
+`envio start` and `envio dev`. The `pnpm codegen` script is still there if you
+want to regenerate types without starting the indexer — for instance before
+`pnpm build` on a fresh checkout, since `tsc` reads the generated types and
+nothing has produced them yet.
 
 Then **read** the recorded snapshot rather than accepting it. It is the only
 end-to-end check that the reworked handlers write what they should, and it was
@@ -89,9 +94,11 @@ metadata cache across 18 chains, which shows up as a slow sync rather than an
 error. Set real endpoints for whichever chains section 2 keeps. All 18 keys are
 listed in `.env.example`.
 
-`ENVIO_API_TOKEN` is needed for `codegen` and for the test suite. In CI it is a
-repository secret — **not yet set on this repository**, so
-`.github/workflows/test.yml` will fail until someone with repo admin adds it.
+`ENVIO_API_TOKEN` is needed to run the indexer and for the HyperSync replay
+test. It is **optional in CI**: `src/indexer.test.ts` skips itself when the
+token is absent, so the workflow is green on a repository with no secret and
+still runs the pure unit tests. Add the secret only if you want the
+end-to-end test to run on every push.
 
 ## 5. Create the indexer and deploy
 

@@ -11,7 +11,10 @@
 import { describe, it } from "vitest";
 import { createTestIndexer } from "envio";
 
-describe("dex-prices-indexer", () => {
+// This test replays real chain events through HyperSync, so it needs a token.
+// Skipped rather than failed when one is absent, so a checkout with no
+// ENVIO_API_TOKEN still runs the pure unit tests.
+describe.skipIf(!process.env.ENVIO_API_TOKEN)("dex-prices-indexer", () => {
   it("Processes ModifyLiquidity on an unknown pool without writing entities", async (t) => {
     const indexer = createTestIndexer();
 

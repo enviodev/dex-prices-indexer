@@ -28,11 +28,14 @@ jobs:
       - name: Install dependencies
         run: pnpm install
 
-      - name: Run codegen
-        run: pnpm codegen
-        env:
-          ENVIO_API_TOKEN: ${{ secrets.ENVIO_API_TOKEN }}
+      # No codegen step: envio >= 3.14 runs codegen as part of `envio start`
+      # and `envio dev`, so the on-disk types stay in sync without a separate
+      # invocation.
 
+      # ENVIO_API_TOKEN is optional. Without it the HyperSync replay test in
+      # src/indexer.test.ts skips itself and the pure unit tests still run, so
+      # CI is green on a repository with no secret configured. Add the secret
+      # to get the end-to-end test as well.
       - name: Run tests
         run: pnpm test
         env:

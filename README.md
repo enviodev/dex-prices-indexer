@@ -107,7 +107,9 @@ cp .env.example .env   # then set ENVIO_API_TOKEN
 pnpm envio dev         # indexer + GraphQL at http://localhost:8080
 ```
 
-If you change `config.yaml` or `schema.graphql`, run `pnpm codegen`.
+`envio dev` regenerates types from `config.yaml` and `schema.graphql` on every
+start, so there is no separate codegen step. `pnpm codegen` still exists for
+regenerating types without starting the indexer.
 
 A warm token-metadata cache matters: see `.envio/cache/linkToLatestCache.txt`.
 
