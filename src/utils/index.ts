@@ -1,5 +1,5 @@
 import { BigDecimal } from "envio";
-import { ZERO_BD, ONE_BD, ZERO_BI } from "./constants";
+import { ZERO_BD, ZERO_BI } from "./constants";
 
 export function exponentToBigDecimal(decimals: bigint): BigDecimal {
   let resultString = "1";
@@ -34,53 +34,6 @@ export function hexToBigInt(hex: string): bigint {
     hex = hex.slice(2);
   }
   return BigInt(`0x${hex}`);
-}
-
-/**
- * Implements exponentiation by squaring
- * (see https://en.wikipedia.org/wiki/Exponentiation_by_squaring )
- * to minimize the number of BigDecimal operations and their impact on performance.
- *
- * Uses Math.floor for correct integer division and caps intermediate precision
- * at 40 digits to prevent BigDecimal digit explosion during squaring steps
- * (without capping, 18 squaring levels would produce ~1M digit intermediates).
- */
-export function fastExponentiation(
-  value: BigDecimal,
-  power: number
-): BigDecimal {
-  if (power < 0) {
-    const result = fastExponentiation(value, -power);
-    return safeDiv(ONE_BD, result);
-  }
-
-  if (power == 0) {
-    return ONE_BD;
-  }
-
-  if (power == 1) {
-    return value;
-  }
-
-  const halfPower = Math.floor(power / 2);
-  const halfResult = fastExponentiation(value, halfPower);
-
-  // Use the fact that x ^ (2n) = (x ^ n) * (x ^ n) and we can compute (x ^ n) only once.
-  // Cap precision after each multiplication to prevent digit explosion.
-  let result = new BigDecimal(halfResult.times(halfResult).toFixed(40));
-
-  // For odd powers, x ^ (2n + 1) = (x ^ 2n) * x
-  if (power % 2 == 1) {
-    result = new BigDecimal(result.times(value).toFixed(40));
-  }
-  return result;
-}
-
-const NULL_ETH_HEX_STRING =
-  "0x0000000000000000000000000000000000000000000000000000000000000001";
-
-export function isNullEthValue(value: string): boolean {
-  return value == NULL_ETH_HEX_STRING;
 }
 
 export function convertTokenToDecimal(

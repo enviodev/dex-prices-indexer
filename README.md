@@ -50,6 +50,17 @@ handler is never fetched.
 | `Bundle` | The chain's native token price in USD, one row per chain |
 | `HookStats` | Uniswap V4 hook adoption: pools, swaps, TVL, volume, fees |
 
+### What was dropped from upstream, and why
+
+| Dropped | Why |
+|---|---|
+| `PoolManager` | No endpoint reads it, and it was the most history-expensive entity in the project: one row per chain, rewritten twice per swap, so it produced as many entity-history rows as `Swap` itself |
+| `Tick` | One row per pool per tick boundary, written on every `ModifyLiquidity`. Nothing here reads tick-level liquidity |
+| `ModifyLiquidity` (the entity) | The liquidity event log. The **handler** stays — pool and token TVL are what the pricing model gates on, so dropping it would silently degrade every price |
+| `Position`, `Transfer`, `Subscribe`, `Unsubscribe` | PositionManager NFT views, along with the whole `PositionManager` contract |
+| 12 of the 15 declared `PoolManager` events | An event with no handler is never fetched, so they cost nothing — but they misdescribed the indexer |
+| 7 `Pool` fields, the `untracked*` duplicates on `Token` | `collectedFees*`, `liquidityProviderCount`, `observationIndex`, `feesUSDUntracked`, `name`, and the untracked TVL mirrors. Nothing serves them |
+
 ### Why `Swap.priceUSD0` / `priceUSD1` exist
 
 A swap's `sqrtPriceX96` gives the pool's token *ratio*, not a USD price.
@@ -65,12 +76,12 @@ A candle row exists only for a bucket that had a swap, so the row count is
 bounded by the number of swaps rather than by `tokens x buckets`: a token with
 three swaps in a day produces three `1m` rows, not 1,440.
 
-The candle entities are **Postgres-only** (`@storage(clickhouse: false)`), and
-that is load-bearing rather than incidental. An open candle is rewritten by
-every swap in its bucket, and each rewrite is an entity-history row. Postgres
-prunes entity history back to each chain's safe checkpoint; ClickHouse keeps
-every version forever. An open candle in ClickHouse is the shape that caused
-enviodev's September 2026 history-bloat incident.
+The cost is write amplification rather than storage: an open candle is
+rewritten by every swap in its bucket, and each rewrite is an entity-history
+row. Postgres prunes that history back to each chain's safe checkpoint, which
+is what makes all four intervals affordable. This project is Postgres-only
+(`storage` in `config.yaml`) — if ClickHouse is ever enabled, the candle
+entities have to be excluded from it, because it keeps every version forever.
 
 A token with no USD price gets no candle at all. A zero `priceUSD` means no
 whitelisted pricing route reached that token, not that it is worthless, and

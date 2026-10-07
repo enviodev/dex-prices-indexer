@@ -49,18 +49,19 @@ Record the measured row count per entity for that range. The footprint
 reasoning in `envio-apis` `plans/2026-10-07-dex-prices-indexer-fork.md` §10 is
 an argument until that number exists.
 
-## 2. Decide the chain set
+## 2. Chain set: all 18
 
-`config.yaml` has **18 chains, all from block 0**. That is the upstream
-dashboard's scope, not necessarily this API's. The reference point: the
-upstream production deployment measured **1437 GiB of Postgres** for that
-scope with no price history (`envio-apis` decision 0010, from the wiki
-incident). Candles add to it.
+**Decided 2026-10-07: the hosted DEX Prices API serves all 18 chains in
+`config.yaml`, from block 0.** No subsetting.
 
-Which chains the hosted DEX Prices API serves at launch is still open
-(decision 0005). Launching with fewer and adding later is cheap; the reverse
-is not. Nothing in this repo needs to change to cut the set — remove chain
-entries from `config.yaml`.
+What that costs, for sizing: the upstream `uniswap-v4-indexer` production
+deployment measured **1437 GiB of Postgres** for the same scope with no price
+history at all (`envio-apis` decision 0010, from the wiki incident). Candles
+add to that, and section 1 should produce a measured per-entity row count to
+turn the estimate into a number.
+
+Dropping chains later is a `config.yaml` edit, but it does not reclaim synced
+data without a resync, so the sizing should assume all 18 stay.
 
 ## 3. Warm the token metadata cache
 

@@ -1,20 +1,10 @@
 # dex-prices-indexer schema
 #
-# Scoped to what the DEX Prices API serves. Postgres only: `storage` in
-# config.yaml sets `clickhouse: false` for every entity, so entity history is
-# pruned back to each chain's safe checkpoint rather than kept forever. The
-# candle entities restate it explicitly because for them it is load-bearing —
-# an open candle is rewritten on every swap in its bucket, which is the shape
-# that caused enviodev's September 2026 ClickHouse history-bloat incident.
-#
-# Dropped from the upstream uniswap-v4-indexer schema, with reasons:
-#   PoolManager   - no endpoint reads it, and it was rewritten twice per swap,
-#                   producing as many history rows as Swap itself
-#   Tick          - one row per pool per tick boundary; no endpoint reads
-#                   tick-level liquidity
-#   ModifyLiquidity - the event log. The handler stays: pool and token TVL
-#                   gate pricing route selection
-#   Position, Transfer, Subscribe, Unsubscribe - PositionManager NFT views
+# Scoped to what the DEX Prices API serves. Postgres only — `storage` in
+# config.yaml sets `clickhouse: false` for the whole project, so entity
+# history is pruned back to each chain's safe checkpoint instead of being kept
+# forever. What this dropped from the upstream uniswap-v4-indexer schema, and
+# why, is in the README.
 
 # A trade. Written once, never updated.
 type Swap
@@ -141,8 +131,12 @@ type HookStats {
 
 # OHLCV for a token's USD price. A row exists only for a bucket that had a
 # swap, so the row count is bounded by swaps, not by tokens x buckets.
+#
+# If ClickHouse is ever enabled for this project, the candle entities must be
+# excluded from it: an open candle is rewritten by every swap in its bucket,
+# and ClickHouse keeps every version forever. That shape is what caused
+# enviodev's September 2026 history-bloat incident.
 type TokenCandle
-  @storage(postgres: true, clickhouse: false)
   @index(fields: ["token", "interval", ["bucketStart", "DESC"]]) {
   id: ID! # {chainId}_{tokenAddress}_{interval}_{bucketStart}
   token: Token!
@@ -162,7 +156,6 @@ type TokenCandle
 # volume in the bucket. 1h and 1d only: per-pool fine granularity serves no
 # endpoint, and summing 24 of the 1h rows is the source for 24-hour volume.
 type PoolCandle
-  @storage(postgres: true, clickhouse: false)
   @index(fields: ["pool", "interval", ["bucketStart", "DESC"]]) {
   id: ID! # {chainId}_{poolId}_{interval}_{bucketStart}
   pool: String!

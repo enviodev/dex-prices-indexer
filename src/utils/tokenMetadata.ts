@@ -71,7 +71,12 @@ const getRpcUrl = (chainId: number): string => {
     case 7777777:
       return process.env.ENVIO_ZORA_RPC_URL || "https://zora.drpc.org";
     case 1868:
-      return process.env.ENVIO_SONIEUM_RPC_URL || "https://sonieum.drpc.org";
+      // NOTE: the fallback host is inherited and looks wrong — the chain is
+      // Soneium, and "sonieum.drpc.org" probably does not resolve. Unverified;
+      // set ENVIO_SONEIUM_RPC_URL rather than relying on it.
+      return (
+        process.env.ENVIO_SONEIUM_RPC_URL || "https://sonieum.drpc.org"
+      );
     case 130:
       return process.env.ENVIO_UNICHAIN_RPC_URL || "https://unichain.drpc.org";
     case 57073:
