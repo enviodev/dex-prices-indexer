@@ -90,18 +90,19 @@ indexer.onEvent(
       };
     }
 
+    // Token.lastUpdated* is deliberately NOT stamped here. It is what the API
+    // reports as a price's `asOf`, and this handler does not recompute
+    // derivedETH or priceUSD — moving it forward would claim a freshness the
+    // price does not have. Pool.lastUpdated* is stamped, because pool state
+    // really did change.
     let token0 = {
       ...existingToken0,
       txCount: existingToken0.txCount + 1n,
-      lastUpdatedTimestamp: BigInt(event.block.timestamp),
-      lastUpdatedBlock: BigInt(event.block.number),
       totalValueLocked: existingToken0.totalValueLocked.plus(amount0),
     };
     let token1 = {
       ...existingToken1,
       txCount: existingToken1.txCount + 1n,
-      lastUpdatedTimestamp: BigInt(event.block.timestamp),
-      lastUpdatedBlock: BigInt(event.block.number),
       totalValueLocked: existingToken1.totalValueLocked.plus(amount1),
     };
 

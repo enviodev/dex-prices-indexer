@@ -278,7 +278,7 @@ indexer.onEvent({ contract: "PoolManager", event: "Swap" }, async ({ event, cont
   context.Token.set(token1);
 
   // OHLCV. Each side of the pool gets its own USD series; the pool gets one
-  // series of its token0 price in token1.
+  // series of one token0 priced in token1 (prices[1] — see writePoolCandles).
   writeTokenCandles(context, {
     specs: token0CandleSpecs,
     existing: token0Candles,
@@ -302,7 +302,7 @@ indexer.onEvent({ contract: "PoolManager", event: "Swap" }, async ({ event, cont
     existing: poolCandles,
     poolId,
     dex: DEX_UNISWAP_V4,
-    price: prices[0],
+    price: prices[1],
     volumeToken0: amount0Abs,
     volumeToken1: amount1Abs,
     volumeUSD: sanitizeBD(finalAmountUSD),

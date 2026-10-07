@@ -22,7 +22,8 @@ type Swap
   @index(fields: ["token0", ["timestamp", "DESC"]])
   @index(fields: ["token1", ["timestamp", "DESC"]]) {
   id: ID! # {chainId}_{blockNumber}_{logIndex}
-  dex: String! @index
+  # Not indexed: it has one value today, so an index would be pure write cost.
+  dex: String!
   transaction: String!
   blockNumber: BigInt!
   timestamp: BigInt! @index
@@ -54,7 +55,7 @@ type Pool
   @index(fields: ["hooks", ["totalValueLockedUSD", "DESC"]]) {
   id: ID! # {chainId}_{poolId}. Opaque: a V4 bytes32 pool id or, for a future
   # DEX, a pool address.
-  dex: String! @index
+  dex: String!
   createdAtTimestamp: BigInt! @index
   createdAtBlockNumber: BigInt!
   lastUpdatedTimestamp: BigInt!
@@ -157,9 +158,9 @@ type TokenCandle
   lastUpdatedTimestamp: BigInt!
 }
 
-# OHLCV for a pool's token0-in-token1 price, plus the pool's volume in the
-# bucket. 1h and 1d only: per-pool fine granularity serves no endpoint, and
-# summing 24 of the 1h rows is the source for 24-hour pool volume.
+# OHLCV of one token0 priced in token1 (Pool.token1Price), plus the pool's
+# volume in the bucket. 1h and 1d only: per-pool fine granularity serves no
+# endpoint, and summing 24 of the 1h rows is the source for 24-hour volume.
 type PoolCandle
   @storage(postgres: true, clickhouse: false)
   @index(fields: ["pool", "interval", ["bucketStart", "DESC"]]) {

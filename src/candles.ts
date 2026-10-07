@@ -12,8 +12,10 @@
  * ClickHouse keeps every version forever. An open candle in ClickHouse is the
  * shape that caused the September 2026 history-bloat incident.
  */
-import { BigDecimal, type handlerContext } from "envio";
-import { ZERO_BD, ZERO_BI } from "./utils/constants";
+// `envio` exports the context type as EvmOnEventContext; there is no
+// `EvmOnEventContext` export (src/utils/pricing.ts aliases it locally).
+import type { BigDecimal, EvmOnEventContext } from "envio";
+import { ZERO_BD } from "./utils/constants";
 
 export type Interval = { label: string; seconds: bigint };
 
@@ -82,13 +84,13 @@ export function poolCandleSpecs(
  * known before any pricing work, so there is nothing to wait for.
  */
 export function loadTokenCandles(
-  context: handlerContext,
+  context: EvmOnEventContext,
   specs: CandleSpec[]
 ) {
   return Promise.all(specs.map((s) => context.TokenCandle.get(s.id)));
 }
 
-export function loadPoolCandles(context: handlerContext, specs: CandleSpec[]) {
+export function loadPoolCandles(context: EvmOnEventContext, specs: CandleSpec[]) {
   return Promise.all(specs.map((s) => context.PoolCandle.get(s.id)));
 }
 
@@ -103,7 +105,7 @@ type PoolCandleRow = Awaited<ReturnType<typeof loadPoolCandles>>[number];
  * writing zeroes would make the series lie.
  */
 export function writeTokenCandles(
-  context: handlerContext,
+  context: EvmOnEventContext,
   args: {
     specs: CandleSpec[];
     existing: TokenCandleRow[];
@@ -138,12 +140,18 @@ export function writeTokenCandles(
 }
 
 /**
- * Writes a pool's candles for this swap. `price` is the pool's token0 price
- * denominated in token1 (`Pool.token0Price`), not a USD price — a pool's own
- * series should not depend on whether either side happens to be priceable.
+ * Writes a pool's candles for this swap.
+ *
+ * `price` is one token0 priced in token1 — i.e. `Pool.token1Price`, which is
+ * `sqrtPriceX96ToTokenPrices()[1]`. Note the inherited Uniswap naming is the
+ * reverse of how it reads: `token0Price` is token0 *per* token1. Passing
+ * `[0]` here would publish every pool chart inverted.
+ *
+ * Not a USD price, deliberately: a pool's own series should not depend on
+ * whether either side happens to be priceable.
  */
 export function writePoolCandles(
-  context: handlerContext,
+  context: EvmOnEventContext,
   args: {
     specs: CandleSpec[];
     existing: PoolCandleRow[];
@@ -188,5 +196,3 @@ export function writePoolCandles(
     });
   });
 }
-
-export { ZERO_BD, ZERO_BI };

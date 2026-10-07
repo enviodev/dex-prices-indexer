@@ -7,9 +7,7 @@ Uniswap V4 today. The name, the schema and the handler layout are built so a
 second DEX is an added contract and handler rather than a second repository —
 see [Adding a DEX](#adding-a-dex).
 
-> **Licence pending.** This repository does not carry a LICENSE file yet. The
-> licence for the Envio APIs indexers is still being decided, and it has to be
-> settled before this repository is made public.
+Licensed under the [MIT License](./LICENSE).
 
 ## Relationship to `uniswap-v4-indexer`
 
@@ -110,6 +108,12 @@ pnpm envio dev         # indexer + GraphQL at http://localhost:8080
 ```
 
 If you change `config.yaml` or `schema.graphql`, run `pnpm codegen`.
+
+A warm token-metadata cache matters: see `.envio/cache/linkToLatestCache.txt`.
+
+## Deploying
+
+See [DEPLOY.md](./DEPLOY.md).
 
 ## Built with
 

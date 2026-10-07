@@ -1,40 +1,47 @@
-Due to GitHub file size limitations, the token metadata cache is hosted on Google Drive:
+Token metadata effect cache
+===========================
+
+`getTokenMetadata` is an effect, so its results are cached in this directory.
+Without a warm cache the indexer refetches every token's name, symbol and
+decimals over RPC — 15.1 million rows' worth across 18 chains at the last
+count. That is the single biggest avoidable cost of a fresh sync.
+
+The cache is too large for git, so it is hosted on Google Drive:
 https://drive.google.com/drive/folders/1PNodRythHPOwbIEr9k5jPwx4gg1TTwKH?usp=sharing
 
-Cache data last updated: 22/07/2026
-Cache format changed:    07/09/2026  <-- see below, the layout is different now
+Cache data last updated: 22/07/2026 (inherited from uniswap-v4-indexer)
 
+LAYOUT: one directory per chain
+-------------------------------
 
-THE FORMAT HAS CHANGED — one file per chain
+This indexer sets `disable_default_cross_chain: true`, which makes effect
+caches per-chain:
 
-This indexer now sets `disable_default_cross_chain: true` in config.yaml, which
-makes effect caches per-chain. A single flat getTokenMetadata.tsv is read as a
-cross-chain cache and is NO LONGER USED. Leaving it in place silently refetches
-every token's metadata over RPC instead of erroring, so the layout matters.
+  .envio/cache/
+    1/getTokenMetadata.tsv
+    10/getTokenMetadata.tsv
+    8453/getTokenMetadata.tsv
+    ...one directory per chain id
 
-Old (no longer used):        New:
-  .envio/cache/                .envio/cache/
-    getTokenMetadata.tsv         1/getTokenMetadata.tsv
-                                 10/getTokenMetadata.tsv
-                                 8453/getTokenMetadata.tsv
-                                 ... one directory per chain id, 18 total
+A single flat `.envio/cache/getTokenMetadata.tsv` is read as a *cross-chain*
+cache, which this indexer no longer uses. It does not error — it is silently
+ignored and every token is refetched over RPC. upstream's flat file was
+deleted from this repository for exactly that reason, so if you see one
+reappear, it is doing nothing.
 
-To update your local cache:
-1. Download getTokenMetadata-per-chain-<date>.zip from the Drive folder above.
-2. Delete any flat .envio/cache/getTokenMetadata.tsv you still have.
-3. Unzip into .envio/cache/ so the chain-id directories sit directly inside it.
+To warm your local cache:
+1. Download getTokenMetadata-per-chain-<date>.zip from the Drive folder.
+2. Unzip into `.envio/cache/` so the chain-id directories sit directly inside.
+3. Make sure no flat `getTokenMetadata.tsv` is left beside them.
 
-The cache keys are unchanged between the two layouts — both are
-["0xADDRESS",CHAIN_ID] — so the per-chain files are a pure split of the old flat
-file. Nothing needs re-keying, and the archive is a straight repartition of the
-22/07/2026 data: 15,145,083 rows in, 15,145,083 rows out.
+The cache keys are `["0xADDRESS",CHAIN_ID]` in both layouts, so the per-chain
+files are a pure repartition of the old flat file: 15,145,083 rows in,
+15,145,083 rows out.
 
+Deploying to Envio Cloud
+------------------------
 
-Note on "unknown" / "UNKNOWN" entries
-
-About 14.8k rows read {"name": "unknown", "symbol": "UNKNOWN", "decimals": 18},
-almost all on Base. These are NOT the cached RPC failures fixed in PR #50 — they
-are tokens whose on-chain name and symbol are literally a single space, which
-sanitizeString trims to "" before the fallback substitutes "unknown". Verified
-by re-querying 50 of them live: all 50 still return " " for both fields. Purging
-them just re-fetches the same values, so leave them alone.
+The cloud build uses whatever is committed here. Since the per-chain cache is
+not in git, a cloud deploy starts cold and refetches metadata over RPC, which
+makes the `ENVIO_*_RPC_URL` settings in DEPLOY.md matter. Envio Cloud's own
+cache save/restore is the other half of this; see DEPLOY.md.
