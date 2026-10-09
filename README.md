@@ -97,3 +97,11 @@ This indexer is open to contributions. Open an issue or pull request on [GitHub]
 
 - [Discord community](https://discord.com/invite/envio)
 - [Envio Docs](https://docs.envio.dev)
+
+## Licence
+
+GPL-3.0-or-later. Copyright (C) 2026 Forward Technology Ltd.
+
+This repository is derived from the [Uniswap V4 Subgraph](https://github.com/Uniswap/v4-subgraph),
+which is GPL-3.0; that is why this is copyleft rather than permissive. `NOTICE` records exactly what
+was taken and what changed. See `LICENSE` for the full text.

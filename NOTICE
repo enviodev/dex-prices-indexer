@@ -1,0 +1,44 @@
+dex-prices-indexer
+Copyright (C) 2026 Forward Technology Ltd
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with
+this program. If not, see <https://www.gnu.org/licenses/>.
+
+
+Derivation
+----------
+
+This work is derived from the Uniswap V4 Subgraph
+(https://github.com/Uniswap/v4-subgraph), which is licensed under the GNU
+General Public License version 3. That licence is why this repository is
+GPL-3.0 and not a permissive licence.
+
+What was taken: the pricing and core entity logic. In particular
+`src/utils/pricing.ts` is a TypeScript port of the subgraph's own
+`pricing.ts`, retaining its function names (`sqrtPriceX96ToTokenPrices`,
+`getTrackedAmountUSD`, `safeDiv`, `exponentToBigDecimal`), its `Q192`
+constant and its native-token and stablecoin-pool handling. Entity shapes in
+`schema.graphql` follow the subgraph's where they describe the same concepts.
+
+What changed, relative to that subgraph:
+
+  - Rewritten to run on Envio HyperIndex rather than The Graph, so handlers,
+    the entity API and the configuration format are different throughout.
+  - Multichain from one deployment, rather than one deployment per chain.
+  - PoolManager, Tick, the ModifyLiquidity entity and PositionManager dropped.
+  - `Swap.priceUSD0` / `priceUSD1` and `blockNumber` added.
+  - `TokenCandle` (1m, 5m, 1h, 1d) and `PoolCandle` (1h, 1d) added; the
+    subgraph has no historical price series.
+  - `asOf` stamps and a `dex` field added.
+
+The Envio HyperIndex runtime this indexer runs on is a separate work with its
+own licensing, and is not covered by this licence.
